@@ -1,3 +1,4 @@
+#include <stdint.h>
 #define NOTE_A 262	   // Do
 #define NOTE_B 294	   // Re
 #define NOTE_C 330	   // Mi
@@ -28,15 +29,10 @@ void create_waveform_table(uint32_t *table, uint32_t num_samples);
 void cfgPIN(void);
 
 /**
- * @brief Initialize and configure the DAC.
- */
-void initDAC(void);
-
-/**
  * @brief Configure the DMA to transfer the waveform to the DAC.
  * @param table Pointer to the waveform table
  */
-void cfgDMA(uint32_t *table);
+void DMA_Init(uint32_t *table);
 
 // DMA configuration structure
 GPDMA_Channel_CFG_Type GPDMACfg;
@@ -52,7 +48,7 @@ void cfgPIN() {
 	PINSEL_ConfigPin(&PinCfg);
 }
 
-void initDAC(uint32_t f_signal) {
+void DAC_Init(uint32_t f_signal) {
 	DAC_CONVERTER_CFG_TYPE dac_cfg;
 	dac_cfg.DBLBUF_ENA = 0;
 	dac_cfg.CNT_ENA = 1;
@@ -149,11 +145,9 @@ char UART_ReceiveChar(void) {
 int main() {
 	uint32_t dac_waveform[NUM_SAMPLES]; // Buffer to store DAC waveform values
 
-	DMA_Init(dac_waveform);
-
 	cfgPIN();
 	UART_Init();
-	DMA_Init();
+	DMA_Init(dac_waveform);
 
 	while (1) {
 		char command = UART_ReceiveChar(); // Recibe el comando de nota
