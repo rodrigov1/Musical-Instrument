@@ -1,73 +1,169 @@
+#ifdef __USE_CMSIS
+#include "LPC17xx.h"
+#endif
+
+#include <cr_section_macros.h>
 #include <stdint.h>
-#define NOTE_A 262	   // Do
-#define NOTE_B 294	   // Re
-#define NOTE_C 330	   // Mi
-#define NOTE_D 349	   // Fa
-#define NOTE_E 392	   // Sol
-#define NOTE_F 440	   // La
-#define NOTE_G 494	   // Si
-#define NUM_SAMPLES 60 // Total number of samples for the full sine wave
+
+// Drivers
+#include <lpc17xx_pinsel.h>
+#include <lpc17xx_gpio.h>
+#include <lpc17xx_adc.h>
+#include <lpc17xx_gpdma.h>
+#include <lpc17xx_dac.h>
+#include <lpc17xx_uart.h>
+
+// Definicion de Macros
+#define DO 262	    // DO
+#define RE 294	    // RE
+#define MI 330	    // MI
+#define FA 349	    // FA
+#define SOL 392	    // SOL
+#define LA 440	    // LA
+#define SI 494	    // SI
+#define NUM_SAMPLES 60  // Total number of samples for the full sine wave
 #define DMA_SIZE 60
 
+// Variables Globales
 uint32_t PCLK = SystemCoreClock / 4; // CCLK/4
-uint32_t fADC = 1000000;			 // 1MHz
-uint32_t sin0_90_16_samples[16] = {0, 1045, 2079, 3090, 4067, 5000, 5877, 6691, 7431, 8090, 8660, 9135, 9510, 9781, 9945, 10000};
-uint32_t dac_waveform[NUM_SAMPLES]; // Buffer to store DAC waveform values
+uint32_t fDAC = 1000000;			 // 1MHz
+// Muestras de Seno desde 90° a 0°, cada 6 grados y multiplicadas por 10.000
+uint16_t sin0_90_16_samples[16] = {0, 1045, 2079, 3090, 4067, 5000, 5877, 6691, 7431, 8090, 8660, 9135, 9510, 9781, 9945, 10000};
+uint8_t octava[7] = {DO, RE, MI, FA, SOL, LA, SI};
+uint16_t dac_waveform[NUM_SAMPLES];  // Buffer to store DAC waveform values
 
-// Prototipos de funciones
-/**
- * @brief Create a full sine wave table for the DAC using 60 samples.
- * The sine wave values are computed based on the 0-90 degree values from the sin0_90_16_samples table.
- * @param table Pointer to the DAC waveform table
- * @param num_samples Number of samples in the waveform
- */
-void create_waveform_table(uint32_t *table, uint32_t num_samples);
-
-/**
- * @brief Configure the pin for DAC output (P0.26).
- */
-void cfgPIN(void);
-
-/**
- * @brief Configure the DMA to transfer the waveform to the DAC.
- * @param table Pointer to the waveform table
- */
-void DMA_Init(uint32_t *table);
-
-// DMA configuration structure
-GPDMA_Channel_CFG_Type GPDMACfg;
-GPDMA_LLI_Type DMA_LLI_Struct; // DMA linked list item for continuous transfer
-
-void cfgPIN() {
+// Funciones de Configuracion
+void PIN_Config(void) {
+	PINSEL_CFG_Type PinCfg;
 	// Configure pin P0.26 as DAC output
 	PinCfg.Funcnum = PINSEL_FUNC_2;			  // DAC function
 	PinCfg.OpenDrain = PINSEL_PINMODE_NORMAL; // Disable open drain
-	PinCfg.Pinmode = PINSEL_PINMODE_PULLUP;	  // No pull-up or pull-down
+	PinCfg.Pinmode = PINSEL_PINMODE_TRISTATE; // No pull-up or pull-down
 	PinCfg.Pinnum = PINSEL_PIN_26;			  // Pin number 26
 	PinCfg.Portnum = PINSEL_PORT_0;			  // Port number 0
 	PINSEL_ConfigPin(&PinCfg);
+
+	// Configure pin P0.23 as ADC Channel 0
+	PinCfg.Pinnum = PINSEL_PIN_23;
+	PinCfg.Funcnum = PINSEL_FUNC_1;
+	PINSEL_ConfigPin(&PinCfg);
+
+	// Configure pin P0.3 as RXD0
+	PinCfg.Pinnum = PINSEL_PIN_3;
+	PinCfg.Funcnum = PINSEL_FUNC_1;
+	PINSEL_ConfigPin(&PinCfg);
 }
 
-void DAC_Init(uint32_t f_signal) {
-	DAC_CONVERTER_CFG_TYPE dac_cfg;
-	dac_cfg.DBLBUF_ENA = 0;
-	dac_cfg.CNT_ENA = 1;
-	dac_cfg.DMA_ENA = 1;
+void DAC_Config() {
+	DAC_CONVERTER_CFG_Type dac_cfg;
+	dac_cfg.DBLBUF_ENA = 0;  // Disable Double Buffer
+	dac_cfg.CNT_ENA = 1;     // Enable DAC Timeout Counter
+	dac_cfg.DMA_ENA = 1;	 // Enable DMA Burst
 	DAC_Init(LPC_DAC);
 
-	// Calculate sample update interval for the desired waveform frequency
-	uint32_t time_out = (PCLK * fDAC) / (SINE_TABLE_SIZE * f_signal);
-	DAC_SetDMATimeOut(LPC_DAC, time_out); // Set the DAC timeout between samples
 	// Apply the DAC configuration
 	DAC_ConfigDAConverterControl(LPC_DAC, &dac_cfg);
 }
 
-void create_waveform_table(uint32_t *table, uint32_t num_samples) {
-	uint32_t i;
+void DAC_Timeout_Config(uint16_t f_signal) {
+	uint32_t time_out = (PCLK * fDAC) / (NUM_SAMPLES * f_signal);
+	DAC_SetDMATimeOut(LPC_DAC, time_out);
+}
+
+// Esto si es que uso un potenciometro para cambiar el volumen
+void ADC_Config(void) {
+	ADC_Init(LPC_ADC, 200000);  // 200 kHz
+	ADC_ChannelCmd(LPC_ADC, 0);
+}
+
+void DMA_Config() {
+	// Set up the DMA linked list for continuous waveform transfer
+	GPDMA_LLI_Type linkedlist;
+	linkedlist.SrcAddr = (uint32_t)dac_waveform;	 // Source: DAC waveform table
+	linkedlist.DstAddr = (uint32_t)&(LPC_DAC->DACR); // Destination: DAC register
+	linkedlist.NextLLI = (uint32_t)&linkedlist;	     // Point to itself for continuous transfer
+	linkedlist.Control = DMA_SIZE
+					   | (1 << 18)		 // Source width: 16-bit
+					   | (2 << 21)		 // Destination width: 16-bit
+					   | (1 << 26);	     // Increment source address
+
+	// Initialize the DMA module
+	GPDMA_Init();
+
+	// Configure DMA channel for memory-to-peripheral transfer
+	GPDMA_Channel_CFG_Type gpdma_channel;
+	gpdma_channel.ChannelNum = 0;						 // Use channel 0
+	gpdma_channel.SrcMemAddr = (uint32_t)table;			 // Source: DAC waveform table
+	gpdma_channel.DstMemAddr = 0;						 // No memory destination (peripheral)
+	gpdma_channel.TransferSize = DMA_SIZE;				 // Transfer size: 60 samples
+	gpdma_channel.TransferWidth = 0;					 // Not used
+	gpdma_channel.TransferType = GPDMA_TRANSFERTYPE_M2P; // Memory-to-Peripheral transfer
+	gpdma_channel.SrcConn = 0;							 // Source is memory
+	gpdma_channel.DstConn = GPDMA_CONN_DAC;				 // Destination: DAC connection
+	gpdma_channel.DMALLI = (uint32_t)&linkedlist;	     // Linked list for continuous transfer
+
+	// Apply DMA configuration
+	GPDMA_Setup(&gpdma_channel);
+	GPDMA_ChannelCmd(0, ENABLE);
+}
+
+void UART_Config(void) {
+	UART_CFG_Type uart_config;
+
+	uart_config.Baud_rate = 9600;
+	uart_config.Databits = UART_DATABIT_8;
+	uart_config.Parity = UART_PARITY_NONE;
+	uart_config.Stopbits = UART_STOPBIT_1;
+
+	// es lo mismo que UART_ConfigStructInit(&uart_config);
+
+	UART_Init(LPC_UART0,&uart_config);
+
+	UART_IntConfig(LPC_UART0, UART_INTCFG_RBR, ENABLE);
+
+	NVIC_EnableIRQ(UART0_IRQn);
+}
+
+// IRQ Handlers
+void UART0_IRQHandler(void){
+	uint8_t NOTA = UART_ReceiveByte(LPC_UART0);
+	playNote(octava[NOTA]);
+
+	// La flag se limpia al leer el valor
+}
+
+// Prototipos Funciones
+uint16_t readVolume(void);
+void create_waveform_table(uint32_t *table);
+void playNote(uint16_t frecuency);
+
+// FUNCION PRINCIPAL
+int main() {
+	PIN_Config();
+	ADC_Config();
+	DAC_Config();
+	DMA_Config();
+	UART_Config();
+
+	create_waveform_table(dac_waveform);
+
+	while (1) {
+		//nope
+	}
+}
+
+uint16_t readVolume() {
+	ADC_StartCmd(LPC_ADC, ADC_START_NOW); // Inicio la conver
+
+	return ADC_ChannelGetData(LPC_ADC, 0);
+}
+
+void create_waveform_table(uint32_t *table) {
+	uint8_t i;
 
 	// Use precomputed sine values for 0° to 90°, scale to DAC range (0 - 1023)
 	// We mirror the values for 90°-180° and 270°-360°, and invert them for 180°-270°.
-	for (i = 0; i < num_samples; i++) {
+	for (i = 0; i < NUM_SAMPLES; i++) {
 		if (i <= 15) // 0° to 90°
 		{
 			table[i] = 512 + (512 * sin0_90_16_samples[i]) / 10000; // Scale and shift for DAC
@@ -87,93 +183,6 @@ void create_waveform_table(uint32_t *table, uint32_t num_samples) {
 	}
 }
 
-void DMA_Init(uint32_t *table) {
-	// Set up the DMA linked list for continuous waveform transfer
-	DMA_LLI_Struct.SrcAddr = (uint32_t)table;			 // Source: DAC waveform table
-	DMA_LLI_Struct.DstAddr = (uint32_t)&(LPC_DAC->DACR); // Destination: DAC register
-	DMA_LLI_Struct.NextLLI = (uint32_t)&DMA_LLI_Struct;	 // Point to itself for continuous transfer
-	DMA_LLI_Struct.Control = DMA_SIZE | (2 << 18)		 // Source width: 32-bit
-							 | (2 << 21)				 // Destination width: 32-bit
-							 | (1 << 26);				 // Increment source address
-
-	// Initialize the DMA module
-	GPDMA_Init();
-
-	// Configure DMA channel for memory-to-peripheral transfer
-	GPDMACfg.ChannelNum = 0;						// Use channel 0
-	GPDMACfg.SrcMemAddr = (uint32_t)table;			// Source: DAC waveform table
-	GPDMACfg.DstMemAddr = 0;						// No memory destination (peripheral)
-	GPDMACfg.TransferSize = DMA_SIZE;				// Transfer size: 60 samples
-	GPDMACfg.TransferWidth = 0;						// Not used
-	GPDMACfg.TransferType = GPDMA_TRANSFERTYPE_M2P; // Memory-to-Peripheral transfer
-	GPDMACfg.SrcConn = 0;							// Source is memory
-	GPDMACfg.DstConn = GPDMA_CONN_DAC;				// Destination: DAC connection
-	GPDMACfg.DMALLI = (uint32_t)&DMA_LLI_Struct;	// Linked list for continuous transfer
-
-	// Apply DMA configuration
-	GPDMA_Setup(&GPDMACfg);
-}
-
 void playNote(uint16_t frequency) {
-	initDAC(frequency);								  // Configura el DAC acorde a la frecuencia de la nota
-	create_waveform_table(dac_waveform, NUM_SAMPLES); // Generate the full sine wave
-	GPDMA_ChannelCmd(DMA_CHANNEL_ZERO, ENABLE);		  // Enable DMA channel 0 to start the waveform generation
+	DAC_Timeout_Config(frequency);	// Configura el DAC acorde a la frecuencia de la nota
 }
-
-// Se podria configurar un boton (EXTI) que al apretarlo detenga la reproduccion de la nota
-
-void UART_Init(void) {
-	// Configura los pines P0.2 y P0.3 para UART
-	LPC_PINCON->PINSEL0 |= (1 << 4) | (1 << 6);
-
-	// Configura el baud rate
-	uint32_t baudrate = 9600;
-	uint32_t Fdiv = (SystemCoreClock / 16) / baudrate;
-	LPC_UART0->LCR = 0x83; // Habilita el divisor y modo 8 bits, sin paridad, 1 bit de parada
-	LPC_UART0->DLM = Fdiv / 256;
-	LPC_UART0->DLL = Fdiv % 256;
-	LPC_UART0->LCR = 0x03; // Desactiva DLAB y mantiene 8N1
-	LPC_UART0->FCR = 0x07; // Habilita y resetea FIFOs
-}
-
-char UART_ReceiveChar(void) {
-	while (!(LPC_UART0->LSR & 0x01))
-		;				   // Espera hasta que el dato esté disponible
-	return LPC_UART0->RBR; // Lee el dato recibido
-}
-
-int main() {
-	uint32_t dac_waveform[NUM_SAMPLES]; // Buffer to store DAC waveform values
-
-	cfgPIN();
-	UART_Init();
-	DMA_Init(dac_waveform);
-
-	while (1) {
-		char command = UART_ReceiveChar(); // Recibe el comando de nota
-		switch (command) {
-		case 'A':
-			playNote(NOTE_A);
-			break;
-			// Otros casos de notas
-		}
-
-		// uint16_t volume = readVolume();
-		// setDACVolume(volume); // Ajusta el volumen en función del valor del ADC
-	}
-}
-
-// ------------------------------------------------------------------
-// -------- Control del volumen con un potenciometro con ADC --------
-// ------------------------------------------------------------------
-/* Esto si es que uso un potenciometro para cambiar el volumen
-void ADC_Init(void) {
-	LPC_PINCON->PINSEL0 |= (1 << 5); // P0.2 como AD0.7 (channel 7 del ADC)
-	ADC_Init(LPC_ADC, 200000);
-	ADC_IntConfig(LPC_ADC, 7, ENABLE);
-	NVIC_EnableIRQ(ADC_IRQn);
-
-uint16_t readVolume() {
-	ADC_ChannelCmd(LPC_ADC, 7) DC_StartCmd(LPC_ADC, ADC_START_NOW) // Inicio la conver
-}
-*/
